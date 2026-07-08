@@ -124,3 +124,29 @@ list. I re-ran `tests/test_playlists.py` — `test_playlist_returns_all_songs`,
 two previously failed). I verified an empty playlist still returns `[]` (slicing an empty list also gave
 `[]`, so no behavior change there) and that ordering is unchanged. A live check confirmed "Friday
 Energy" now returns all 7 songs.
+
+### Issue #4 — Notified on playlist-add but not on rating
+**How I reproduced it.** Using the seeded data, I checked simone's notification count (0), then called
+`rate_song(user_id=kenji, song_id=<a song simone shared>, score=5)` and re-checked. The count stayed at
+**0** — the rating was persisted (visible on the song) but no notification was created, exactly as
+aaliya reported. For contrast, the playlist-add path in the same module *does* create a notification.
+
+**How I found the root cause.** I traced `POST /songs/<id>/rate` (`routes/songs.py`) →
+`rate_song` in `services/notification_service.py`. Following the hint, I read `rate_song` line-by-line
+against the working `add_to_playlist` in the same file. `add_to_playlist` ends with a guarded call:
+`if song.shared_by != added_by_user_id: create_notification(...)`. `rate_song` had no equivalent — it
+committed the `Rating` and returned. That side-by-side comparison confirmed the cause was a missing
+step, not a typo or a broken condition.
+
+**The root cause.** `rate_song` never called `create_notification`. The notification-on-interaction
+pattern that exists for playlist adds was simply never implemented for ratings, so no `Notification`
+row was ever produced when a song was rated.
+
+**My fix and side-effect check.** After the `db.session.commit()` that saves the rating, I added the
+same guarded notification the playlist path uses: when `song.shared_by != user_id`, create a
+`song_rated` notification for the sharer. I mirrored the existing pattern (guard so users aren't
+notified about rating their own songs; reuse `create_notification`). I wrote a regression test
+(`tests/test_notifications.py::test_rating_notifies_the_sharer`) asserting a `song_rated` notification
+is created, plus `test_rating_own_song_does_not_notify` for the self-rating guard — both pass. I
+confirmed the existing rate-then-update behavior (score changes for an already-rated song) still works
+and that the playlist-add notification is unaffected.
