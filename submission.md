@@ -150,3 +150,32 @@ notified about rating their own songs; reuse `create_notification`). I wrote a r
 is created, plus `test_rating_own_song_does_not_notify` for the self-rating guard — both pass. I
 confirmed the existing rate-then-update behavior (score changes for an already-rated song) still works
 and that the playlist-add notification is unaffected.
+
+### Issue #1 — Listening streak resets on Sundays
+**How I reproduced it.** I couldn't rely on the real clock (today isn't a Sunday), so I called
+`update_listening_streak(user, now)` directly with a controlled `now`. I set a user to
+`listening_streak = 12` with `last_listened_at` on a Saturday, then called the function with a Sunday
+`now` one calendar day later. The streak dropped from 12 to **1** instead of going to 13. As a control,
+the same "consecutive day" scenario landing on a Monday correctly produced 13 — isolating the trigger
+to Sunday specifically.
+
+**How I found the root cause.** From `POST /songs/<id>/listen` (`routes/songs.py`) →
+`record_listening_event` → `update_listening_streak` in `services/streak_service.py`. Reading the
+branch that increments the streak, I saw the condition
+`elif days_since_last == 1 and today.weekday() != 6:`. I confirmed with a one-liner that
+`datetime.weekday()` returns `6` for Sunday, which meant the increment branch is skipped on Sundays and
+control falls through to the `else` that resets the streak to 1. That was the specific cause, not just a
+suspicious area.
+
+**The root cause.** `datetime.weekday()` returns `6` for Sunday. The increment branch required
+`today.weekday() != 6`, so any streak update that happened on a Sunday failed the condition and fell
+into the reset branch — throwing away the streak even though the user listened on consecutive days.
+There is no rule in the function's documented behavior that justifies treating Sunday differently; the
+clause was simply wrong.
+
+**My fix and side-effect check.** I removed the `and today.weekday() != 6` clause, so the branch is now
+`elif days_since_last == 1:` — a consecutive calendar day always increments, on any weekday. I re-ran
+`tests/test_streaks.py`: all 5 pass, including the previously-failing `test_streak_increments_on_sunday`.
+I specifically checked `test_streak_resets_after_skipped_day` still passes, confirming that a genuine
+gap (more than one day) still resets to 1, and `test_streak_does_not_double_count_same_day` confirms a
+same-day repeat still makes no change.
