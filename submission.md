@@ -3,10 +3,7 @@
 ## AI Usage
 _(Fill in at Milestone 4.)_ I used Claude Code during codebase orientation to summarize each service
 file and trace call chains, and during debugging to explain suspicious functions once I had located
-them myself. Specific uses and where I verified/overrode the AI's output are documented per-bug in the
-root cause analysis entries below.
-
----
+them myself
 
 ## Codebase Map
 
