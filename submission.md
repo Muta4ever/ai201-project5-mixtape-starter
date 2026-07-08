@@ -204,3 +204,35 @@ I removed the now-unused `RECENT_THRESHOLD` constant and `timedelta` import. I w
 is included — both pass. I checked `get_activity_feed` in the same module is untouched (it never used
 the threshold and is intentionally not time-filtered), and that the per-friend dedup and ordering are
 unchanged. Note: "today" is evaluated in UTC, consistent with how the rest of the app stores timestamps.
+
+### Issue #3 — The same song shows up multiple times in search
+**How I reproduced it.** This one is conditional and environment-sensitive. Running `search_songs`
+directly against the seeded DB returned "Crown Heights Anthem" only **once**, not the reported three
+times. To find out why, I executed the service's own query at the raw-SQL level
+(`db.session.execute(q.statement).all()`) and it returned **3 rows** for that one song — one per tag.
+So the buggy query genuinely multiplies rows; the duplicates just weren't surfacing through the ORM in
+this environment (SQLAlchemy 2.0.51's legacy `Query.all()` de-duplicates ORM entities by primary key).
+The reporter clearly hit a path/version where that masking didn't apply. The condition that triggers
+the extra rows is a song having **more than one tag** — which is exactly why the seed data includes
+songs with 3+ tags.
+
+**How I found the root cause.** From `GET /songs/search?q=` (`routes/songs.py`) → `search_songs` in
+`services/search_service.py`. The query did
+`.outerjoin(song_tags, Song.id == song_tags.c.song_id)` and then filtered only on `Song.title`/
+`Song.artist`. The join fans a song out to one row per tag, and nothing downstream uses `song_tags` —
+the filter doesn't reference it and the output builds tags from the `Song.tags` relationship inside
+`to_dict()`. The moment I confirmed the join was both the source of the row multiplication *and*
+entirely unused, I knew it was the root cause rather than a symptom.
+
+**The root cause.** The `outerjoin(song_tags, ...)` produced a Cartesian-style expansion: one result
+row per (song, tag) pair. A song with N tags produced N identical rows. The join contributed nothing to
+filtering or output, so correctness depended entirely on the ORM happening to de-duplicate the rows —
+which is fragile and not guaranteed across query styles/versions.
+
+**My fix and side-effect check.** I removed the `outerjoin(song_tags, ...)` entirely (and the now-unused
+`Tag`/`song_tags` imports), leaving a plain `query(Song).filter(...)`. This fixes the duplication at its
+source instead of masking it. I verified the raw SQL now returns 1 row (previously 3), and that tags
+still appear in each result (`['rap', 'hip-hop', 'boom bap']`) since they load from the `Song.tags`
+relationship, not the join. All 5 tests in `tests/test_search.py` pass — including
+`test_search_no_duplicates_multi_tag_song` — and matching by artist (`test_search_returns_matching_songs`)
+and the empty-result case still work.
