@@ -2,8 +2,7 @@
 
 ## AI Usage
 _(Fill in at Milestone 4.)_ I used Claude Code during codebase orientation to summarize each service
-file and trace call chains, and during debugging to explain suspicious functions once I had located
-them myself
+file and trace call chains, and during debugging to explain suspicious functions once I had located them myself.
 
 ## Codebase Map
 
