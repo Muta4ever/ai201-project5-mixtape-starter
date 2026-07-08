@@ -179,3 +179,28 @@ clause was simply wrong.
 I specifically checked `test_streak_resets_after_skipped_day` still passes, confirming that a genuine
 gap (more than one day) still resets to 1, and `test_streak_does_not_double_count_same_day` confirms a
 same-day repeat still makes no change.
+
+### Issue #2 — "Friends Listening Now" shows people from yesterday
+**How I reproduced it.** I inserted a `ListeningEvent` for a friend timestamped in the previous
+evening and called `get_friends_listening_now`. The friend still appeared. Isolating it in a fresh
+in-memory DB (so seed data couldn't add other same-day plays), a friend whose only play was yesterday
+at 23:00 was included in the morning feed — matching nova's report about darius.
+
+**How I found the root cause.** From `GET /feed/<id>/listening-now` (`routes/feed.py`) →
+`get_friends_listening_now` in `services/feed_service.py`. The filter compared `listened_at` against
+`cutoff = datetime.now(timezone.utc) - RECENT_THRESHOLD`, where `RECENT_THRESHOLD = timedelta(hours=24)`.
+Seeing the cutoff was `now - 24h` made it clear: this is a rolling 24-hour window, not a "today"
+boundary, which is why an 11pm play is still within range at 9am the next morning (only ~10 hours old).
+
+**The root cause.** The feed defined "recent" as "within the last 24 hours" (a sliding window) rather
+than "since the start of today." Any play from the previous evening stays inside a 24-hour window until
+the same clock time the next day, so yesterday's activity lingers in a feed that is supposed to mean
+"today."
+
+**My fix and side-effect check.** I replaced the rolling window with a calendar-day boundary: the cutoff
+is now the start of the current UTC day (`now.replace(hour=0, minute=0, second=0, microsecond=0)`), and
+I removed the now-unused `RECENT_THRESHOLD` constant and `timedelta` import. I wrote
+`tests/test_feed.py` with a boundary pair — a play at yesterday 23:00 is excluded, a play at today 00:01
+is included — both pass. I checked `get_activity_feed` in the same module is untouched (it never used
+the threshold and is intentionally not time-filtered), and that the per-friend dedup and ordering are
+unchanged. Note: "today" is evaluated in UTC, consistent with how the rest of the app stores timestamps.
